@@ -24,12 +24,19 @@ module AgUi
       tool_call_args: :translate_tool_call_args,
       tool_call_end: :translate_tool_call_end,
       tool_call_result: :translate_tool_call_result,
+      state_snapshot: :translate_state_snapshot,
+      state_delta: :translate_state_delta,
+      messages_snapshot: :translate_messages_snapshot,
       activity_snapshot: :translate_activity_snapshot,
       reasoning_start: :translate_reasoning_start,
       reasoning_message_start: :translate_reasoning_message_start,
       reasoning_message_content: :translate_reasoning_message_content,
       reasoning_message_end: :translate_reasoning_message_end,
       reasoning_end: :translate_reasoning_end,
+      step_started: :translate_step_started,
+      step_finished: :translate_step_finished,
+      custom: :translate_custom,
+      raw: :translate_raw,
     }.freeze
 
     def initialize(stream)
@@ -86,6 +93,40 @@ module AgUi
           tool_call_id: data[:tool_call_id],
           content: data[:content],
         )
+      end
+
+      # Shared state (CoAgents). snapshot replaces the whole state; delta is a
+      # JSON Patch (RFC 6902) op array the client applies to its own store.
+      def translate_state_snapshot(data)
+        @stream.state_snapshot(snapshot: data[:snapshot])
+      end
+
+      def translate_state_delta(data)
+        @stream.state_delta(delta: data[:delta])
+      end
+
+      def translate_messages_snapshot(data)
+        @stream.messages_snapshot(messages: data[:messages])
+      end
+
+      # Structured progress markers (paired start/finish by step name).
+      def translate_step_started(data)
+        @stream.step_started(step_name: data[:step_name])
+      end
+
+      def translate_step_finished(data)
+        @stream.step_finished(step_name: data[:step_name])
+      end
+
+      # Escape hatches: CUSTOM carries app/agent-defined events (e.g. the
+      # "PredictState" convention for predictive state updates); RAW passes a
+      # framework event straight through.
+      def translate_custom(data)
+        @stream.custom(name: data[:name], value: data[:value])
+      end
+
+      def translate_raw(data)
+        @stream.raw(event: data[:event], source: data[:source])
       end
 
       def translate_activity_snapshot(data)
@@ -170,5 +211,37 @@ describe "AgUi::EventBridge" do
 
     result.should.equal?(bridge)
     read_frames.(stream).should == []
+  end
+
+  it "translates shared-state events (snapshot + JSON-Patch delta)" do
+    stream = AgUi::Server::SSE::Stream.new(thread_id: "t1", run_id: "r1")
+    bridge = AgUi::EventBridge.new(stream)
+
+    bridge << { type: :state_snapshot, data: { snapshot: { "theme" => "dark" } } }
+    bridge << { type: :state_delta,
+                data: { delta: [{ "op" => "replace", "path" => "/theme", "value" => "light" }] } }
+    stream.finish
+
+    frames = read_frames.(stream)
+    frames.map { |f| f["type"] }.should == %w[STATE_SNAPSHOT STATE_DELTA]
+    frames[0]["snapshot"].should == { "theme" => "dark" }
+    frames[1]["delta"].first["path"].should == "/theme"
+  end
+
+  it "translates CUSTOM (e.g. the PredictState convention) and STEP markers" do
+    stream = AgUi::Server::SSE::Stream.new(thread_id: "t1", run_id: "r1")
+    bridge = AgUi::EventBridge.new(stream)
+
+    bridge << { type: :step_started, data: { step_name: "plan" } }
+    bridge << { type: :custom,
+                data: { name: "PredictState",
+                        value: [{ "state_key" => "document", "tool" => "write" }] } }
+    bridge << { type: :step_finished, data: { step_name: "plan" } }
+    stream.finish
+
+    frames = read_frames.(stream)
+    frames.map { |f| f["type"] }.should == %w[STEP_STARTED CUSTOM STEP_FINISHED]
+    frames[0]["stepName"].should == "plan"
+    frames[1]["name"].should == "PredictState"
   end
 end

@@ -1,9 +1,10 @@
 PATH
   remote: .
   specs:
-    ag-ui (0.2.0)
+    ag-ui (0.3.0)
       async (~> 2.0)
       brute (~> 3.0, >= 3.0.1)
+      hana (~> 1.3)
       json_schemer (~> 2.5)
       protocol-http (~> 0.62)
       rack (~> 3.0)

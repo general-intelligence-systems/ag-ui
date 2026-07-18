@@ -26,6 +26,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'protocol-http', '~> 0.62'
   spec.add_dependency 'rack', '~> 3.0'
   spec.add_dependency 'json_schemer', '~> 2.5'
+  spec.add_dependency 'hana', '~> 1.3'
   spec.add_dependency 'brute', '~> 3.0', '>= 3.0.1'
 
   # ruby_llm is the reference engine but the run loop only touches it through
