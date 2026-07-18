@@ -90,12 +90,42 @@ Open `http://localhost:3000` (first compile is slow — `wait_for` the
 Screenshots of a passing run: `verification/screenshots/` (2026-07-18,
 Swap B, commit `895f7f3`).
 
+## A2UI harness: `a2ui-pdf-analyst/`
+
+The CopilotKit showcase with a custom catalog (frontend-owned renderers,
+`SurfaceCanvas`) and `HttpAgent`s to a backend on :8123 — the full A2UI
+architecture. The Ruby agent replaces both Python agents:
+
+```bash
+# 1. Ruby A2UI agent on the showcase's agent port (serves /fixed + /dynamic;
+#    catalog id + component vocabulary are extracted from the vendored
+#    agent/src/catalog.py — nothing hand-transcribed)
+ANTHROPIC_API_KEY=sk-... PORT=8123 bundle exec ruby examples/a2ui_analyst.rb
+
+# 2. UI (npm install --ignore-scripts once — the postinstall hooks build the
+#    Python agent we replace)
+cd verification/a2ui-pdf-analyst && npx next dev
+```
+
+Gate: open `http://localhost:3000/dynamic`, ask for a dashboard
+("Show me a revenue dashboard for a fictional coffee company: KPIs, a
+revenue trend, and a breakdown by region"). The chat streams a preamble +
+a SURFACE chip, and the canvas renders the composed dashboard from our
+`ACTIVITY_SNAPSHOT` operations. A passing run:
+`screenshots/a2ui-dynamic-dashboard.png`.
+
+Notes:
+- The chat input needs real key events — use `type_text`, not `fill`
+  (React state doesn't observe `fill`).
+- Catalog-membership validation matters: without the extracted component
+  list the model can invent components (`Column`) that reach the canvas as
+  "Unknown component"; with it, invalid surfaces fail server-side with
+  structured errors.
+
 ## Limits
 
-- No A2UI canvas in this example — A2UI (phase 4) gates against the host-app
-  panel only.
-- The stock Python agent (`agent/`) needs an OpenAI key; we never run it —
-  the unmodified Node runtime in Swap A is the conformance oracle.
+- The stock Python agents need OpenAI keys; we never run them — the
+  unmodified Node runtime in Swap A is the conformance oracle.
 - Node runtime `/info` differs from ours by design in Swap A (it advertises
   its own runner's thread endpoints); parity of OUR `/info` is asserted in
   Swap B and in the gem's specs.

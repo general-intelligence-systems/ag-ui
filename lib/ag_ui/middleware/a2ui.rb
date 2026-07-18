@@ -97,8 +97,15 @@ module AgUi
 
       private
 
+        # A catalog can carry an id without component schemas (the app may
+        # teach the model its vocabulary through the system prompt instead)
+        # — only inject and validate against components when they exist.
+        def catalog_components?
+          @catalog && !@catalog.components.to_h.empty?
+        end
+
         def inject_catalog_schema(env)
-          if @catalog
+          if catalog_components?
             env[:messages].unshift(
               Brute::Message.new(
                 role: :system,
@@ -120,7 +127,7 @@ module AgUi
           validation = ::AgUi::A2ui.validate_components(
             components: args["components"],
             data: args["data"].is_a?(Hash) ? args["data"] : {},
-            catalog: @catalog ? { "components" => @catalog.components } : nil,
+            catalog: catalog_components? ? { "components" => @catalog.components } : nil,
             validate_bindings: false,
           )
 
@@ -224,6 +231,26 @@ describe "AgUi::Middleware::A2ui" do
     schema_msg.role.should == :system
     schema_msg.content.should.include?("A2UI Component Schema")
     schema_msg.content.should.include?("Card")
+  end
+
+  it "keeps an id-only catalog prompt-driven: no schema message, structural validation" do
+    id_only = AgUi::A2ui::Catalog.new(catalog_id: "app://cat", components: {})
+    seen = nil
+    terminal = ->(env) do
+      seen = env
+      env[:messages] << render_call.(
+        "surfaceId" => "s1",
+        "components" => [{ "id" => "root", "component" => "AnythingGoes" }],
+      )
+    end
+
+    env = { messages: Brute.log, events: [], tools: [] }
+    AgUi::Middleware::A2ui.new(terminal, catalog: id_only).call(env)
+
+    seen[:messages].first.role.should == :assistant  # no schema system message
+    env[:events][0][:data][:content].key?("a2ui_operations").should == true
+    env[:events][0][:data][:content]["a2ui_operations"][0]["createSurface"]["catalogId"]
+      .should == "app://cat"
   end
 
   it "injects the tool without a schema message when degraded (no catalog)" do

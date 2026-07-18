@@ -24,3 +24,6 @@ NOTES.txt
 verification/pydantic-ai/node_modules/
 verification/pydantic-ai/.next/
 verification/pydantic-ai/agent/.venv/
+verification/a2ui-pdf-analyst/node_modules/
+verification/a2ui-pdf-analyst/.next/
+verification/a2ui-pdf-analyst/agent/.venv/

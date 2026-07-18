@@ -191,8 +191,17 @@ zero host-app coupling.
       (`--copilot-kit-primary-color: #20B2AA` on the DOM); the `go_to_moon`
       HITL card rendered from streamed `TOOL_CALL_ARGS`, Launch clicked, and
       the follow-up run streamed — screenshots in `verification/screenshots/`
-- [ ] Keep Swap B as a regression harness: re-run after each later phase
-      (A2UI lands only in host-app — this example has no canvas)
+- [x] **A2UI browser gate** (`verification/a2ui-pdf-analyst`, the CopilotKit
+      showcase with a custom catalog + SurfaceCanvas): Ruby agent
+      (`examples/a2ui_analyst.rb`, catalog id + vocabulary extracted from the
+      vendored agent source) replaced the Python agents behind both HttpAgent
+      URLs — Claude composed a full revenue dashboard (KPI cards, trend chart,
+      region donut, bar chart) rendered on the canvas from our
+      ACTIVITY_SNAPSHOT ops. Catalog-membership validation gates renders
+      (first attempt used an invented `Column`; caught once the extracted
+      component list was wired in). Screenshot: `a2ui-dynamic-dashboard.png`
+- [ ] Keep the harnesses (pydantic-ai Swap B + a2ui-pdf-analyst) as
+      regression suites; re-run after wire-layer changes
 
 ### Phase 4 — A2UI  *(gate: "show me something cool" renders on canvas — cutover-ready)*
 - [x] `AgUi::A2ui::Catalog.fetch`: retry loop (20×3s default) + degrade-to-nil,
