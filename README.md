@@ -102,11 +102,10 @@ bin/test         # scampi — specs are co-located in each file's __END__ block
 bin/console      # irb with the gem loaded
 ```
 
-Releasing:
+Releasing (builds, pushes to rubygems, tags `v<version>` and pushes the tag):
 
 ```bash
 bin/increment-version <major|minor|patch>
-bin/tag-version
 bin/release-gem
 ```
 
