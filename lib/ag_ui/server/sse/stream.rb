@@ -79,12 +79,16 @@ module AgUi
           # Pydantic serializes non-null field defaults onto the wire
           # (e.g. TEXT_MESSAGE_START carries role: "assistant" when
           # omitted); null defaults are dropped by exclude_none. Mirror
-          # that: pre-fill non-null defaults, let kwargs override.
+          # that: pre-fill non-null defaults, let kwargs override. Fields
+          # whose schema is a const (e.g. REASONING_MESSAGE_START's
+          # role: "reasoning") can only hold that value — fill them too,
+          # matching the reference SDKs' constructor defaults.
           property_defaults = AgUi::Protocol::JsonSchema.raw_schema
             .dig("definitions", definition_name, "properties")
             .each_with_object({}) do |(camel, prop), defaults|
-              unless prop["default"].nil?
-                defaults[camel] = prop["default"]
+              value = prop["default"].nil? ? prop["const"] : prop["default"]
+              unless value.nil?
+                defaults[camel] = value
               end
             end
 
