@@ -17,8 +17,12 @@ RubyLLM.configure do |config|
   config.anthropic_api_key = ENV.fetch("ANTHROPIC_API_KEY")
 end
 
+# THINKING_BUDGET=2048 enables extended thinking -> REASONING_* events.
+thinking_budget = ENV["THINKING_BUDGET"]
+
 terminal = AgUi::Terminals::RubyLLM.new(
   model: ENV.fetch("COPILOTKIT_MODEL", "anthropic/claude-sonnet-4-5"),
+  thinking: thinking_budget ? { budget: Integer(thinking_budget, 10) } : nil,
 )
 
 run_loop = AgUi::RunLoop.new(

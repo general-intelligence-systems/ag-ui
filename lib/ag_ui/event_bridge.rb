@@ -25,6 +25,11 @@ module AgUi
       tool_call_end: :translate_tool_call_end,
       tool_call_result: :translate_tool_call_result,
       activity_snapshot: :translate_activity_snapshot,
+      reasoning_start: :translate_reasoning_start,
+      reasoning_message_start: :translate_reasoning_message_start,
+      reasoning_message_content: :translate_reasoning_message_content,
+      reasoning_message_end: :translate_reasoning_message_end,
+      reasoning_end: :translate_reasoning_end,
     }.freeze
 
     def initialize(stream)
@@ -90,6 +95,28 @@ module AgUi
           content: data[:content],
           replace: data.fetch(:replace, true),
         )
+      end
+
+      def translate_reasoning_start(data)
+        @stream.reasoning_start(message_id: data[:message_id])
+      end
+
+      def translate_reasoning_message_start(data)
+        @stream.reasoning_message_start(message_id: data[:message_id])
+      end
+
+      def translate_reasoning_message_content(data)
+        unless data[:delta].to_s.empty?
+          @stream.reasoning_message_content(message_id: data[:message_id], delta: data[:delta])
+        end
+      end
+
+      def translate_reasoning_message_end(data)
+        @stream.reasoning_message_end(message_id: data[:message_id])
+      end
+
+      def translate_reasoning_end(data)
+        @stream.reasoning_end(message_id: data[:message_id])
       end
   end
 end

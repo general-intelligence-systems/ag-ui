@@ -217,13 +217,14 @@ zero host-app coupling.
       (incl. `log_a2ui_event` / `forwardedProps.a2uiAction` round-trip trace)
 
 ### Phase 5 — Context, attachments, reasoning
-- [ ] `RunAgentInput.context` (`[{description, value}]`) → system/context
-      addendum middleware (nav tool depends on it — test "what page am I on?")
-- [ ] Multimodal user content parts → `ruby_llm` `with:` (image/document at
-      minimum; both `data` (base64) and `url` sources)
-- [ ] Extended thinking → `REASONING_START` /
-      `REASONING_MESSAGE_START/CONTENT/END` / `REASONING_END`
-      (`role:"reasoning"`; never `THINKING_*`)
+- [x] `RunAgentInput.context` → system addendum (`Middleware::SystemPrompt`,
+      live-verified back in phase 1: model reads `currentPath`)
+- [x] Multimodal user content parts → `ruby_llm` Content attachments
+      (`data` base64 → io-like with mime-derived filename, `url` as-is;
+      all-text arrays still flatten for the pipeline)
+- [x] Extended thinking → `REASONING_*` (`TurnEmitter`: lazy open, closes
+      before the text phase) — LIVE-verified: `THINKING_BUDGET=2048`
+      streamed real deltas then the answer (`examples/claude.rb`)
 
 ### Phase 6 — Tail (post-cutover)
 - [ ] Server tools: registry + inline execution via the brute `ToolPipeline`

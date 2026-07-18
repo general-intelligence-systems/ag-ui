@@ -68,17 +68,17 @@ module AgUi
         end
 
         # Multimodal content arrives as an array of InputContent parts.
-        # Phase 1 flattens text parts; media parts pass through to the
-        # terminal in phase 5 (ruby_llm `with:`).
+        # All-text arrays flatten to a plain string (pipeline middleware
+        # reads string content); arrays carrying media parts stay raw —
+        # the terminal maps them to its provider's attachment API.
         def text_content(content)
           case content
           when Array
-            parts = content.filter_map do |part|
-              if part["type"] == "text"
-                part["text"]
-              end
+            if content.all? { |part| part["type"] == "text" }
+              content.map { |part| part["text"] }.join("\n")
+            else
+              content
             end
-            parts.join("\n")
           else
             content.to_s
           end
@@ -129,15 +129,23 @@ describe "AgUi::Messages.to_brute" do
     log.first.tool_calls.first.arguments.should == {}
   end
 
-  it "flattens multimodal user content to its text parts" do
-    log = AgUi::Messages.to_brute([
+  it "flattens all-text part arrays and preserves arrays carrying media" do
+    text_only = AgUi::Messages.to_brute([
+      { "id" => "u1", "role" => "user", "content" => [
+        { "type" => "text", "text" => "hello" },
+        { "type" => "text", "text" => "there" },
+      ] },
+    ])
+    text_only.first.content.should == "hello\nthere"
+
+    multimodal = AgUi::Messages.to_brute([
       { "id" => "u1", "role" => "user", "content" => [
         { "type" => "text", "text" => "what is this?" },
         { "type" => "image", "source" => { "type" => "url", "value" => "http://x/y.png" } },
-        { "type" => "text", "text" => "please describe" },
       ] },
     ])
-    log.first.content.should == "what is this?\nplease describe"
+    multimodal.first.content.should.be.kind_of(Array)
+    multimodal.first.content.last["type"].should == "image"
   end
 
   it "skips activity and reasoning messages" do

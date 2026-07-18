@@ -27,18 +27,30 @@ module AgUi
     # Accepts the host app's "anthropic/claude-sonnet-4-5" env form or a bare
     # ruby_llm model id.
     class RubyLLM
-      def initialize(model: "anthropic/claude-sonnet-4-5", chat_factory: nil)
+      # thinking: {effort:} or {budget:} enables extended thinking
+      # (ruby_llm with_thinking); its deltas stream as REASONING_* events.
+      def initialize(model: "anthropic/claude-sonnet-4-5", thinking: nil, chat_factory: nil)
         @provider, @model = split_model(model)
+        @thinking = thinking
         @chat_factory = chat_factory || default_chat_factory
       end
 
       def call(env)
         chat = @chat_factory.call(model: @model, provider: @provider)
+        if @thinking
+          chat.with_thinking(**@thinking)
+        end
         register_client_tools(chat, env[:tools])
         seed(chat, env[:messages])
 
-        emitter = TextEmitter.new(env[:events])
-        chat.complete { |chunk| emitter.delta(chunk.content.to_s) }
+        emitter = TurnEmitter.new(env[:events])
+        chat.complete do |chunk|
+          thinking = chunk.thinking
+          if thinking&.text
+            emitter.thinking_delta(thinking.text.to_s)
+          end
+          emitter.text_delta(chunk.content.to_s)
+        end
         emitter.finish
 
         conclude(chat, env)
@@ -72,33 +84,67 @@ module AgUi
         end
       end
 
-      # Emits TEXT_MESSAGE_START lazily on the first non-empty delta, so
-      # tool-call-only turns don't produce an empty message bubble.
-      class TextEmitter
+      # Emits the turn's reasoning + text phases lazily: nothing opens
+      # until its first non-empty delta (tool-call-only turns produce no
+      # empty bubbles), and reasoning closes as soon as text begins —
+      # providers stream thinking strictly before the answer.
+      class TurnEmitter
         def initialize(events)
           @events = events
-          @message_id = SecureRandom.uuid
-          @started = false
+          @text_id = SecureRandom.uuid
+          @reasoning_id = SecureRandom.uuid
+          @text_started = false
+          @reasoning_open = false
         end
 
-        def delta(text)
+        def thinking_delta(text)
           unless text.empty?
-            unless @started
-              @events << { type: :text_message_start, data: { message_id: @message_id } }
-              @started = true
+            open_reasoning
+            @events << {
+              type: :reasoning_message_content,
+              data: { message_id: @reasoning_id, delta: text },
+            }
+          end
+        end
+
+        def text_delta(text)
+          unless text.empty?
+            close_reasoning
+            unless @text_started
+              @events << { type: :text_message_start, data: { message_id: @text_id } }
+              @text_started = true
             end
             @events << {
               type: :text_message_content,
-              data: { message_id: @message_id, delta: text },
+              data: { message_id: @text_id, delta: text },
             }
           end
         end
 
         def finish
-          if @started
-            @events << { type: :text_message_end, data: { message_id: @message_id } }
+          close_reasoning
+          if @text_started
+            @events << { type: :text_message_end, data: { message_id: @text_id } }
           end
         end
+
+        private
+
+          def open_reasoning
+            unless @reasoning_open
+              @events << { type: :reasoning_start, data: { message_id: @reasoning_id } }
+              @events << { type: :reasoning_message_start, data: { message_id: @reasoning_id } }
+              @reasoning_open = true
+            end
+          end
+
+          def close_reasoning
+            if @reasoning_open
+              @events << { type: :reasoning_message_end, data: { message_id: @reasoning_id } }
+              @events << { type: :reasoning_end, data: { message_id: @reasoning_id } }
+              @reasoning_open = false
+            end
+          end
       end
 
       private
@@ -148,7 +194,7 @@ module AgUi
             when :system
               chat.with_instructions(message.content.to_s, append: true)
             when :user
-              chat.add_message(role: :user, content: message.content.to_s)
+              chat.add_message(role: :user, content: user_content(message.content))
             when :assistant
               seed_assistant(chat, message)
             when :tool
@@ -158,6 +204,49 @@ module AgUi
                 tool_call_id: message.tool_call_id,
               )
             end
+          end
+        end
+
+        # Multimodal user content (InputContent part arrays, preserved by
+        # Messages.to_brute) becomes a ruby_llm Content: text parts joined,
+        # media parts attached — url sources as-is, base64 data sources as
+        # io-like attachments named from their mime type.
+        def user_content(content)
+          if content.is_a?(Array)
+            text = content.filter_map do |part|
+              if part["type"] == "text"
+                part["text"]
+              end
+            end
+            rich = ::RubyLLM::Content.new(text.join("\n"))
+            content.each do |part|
+              attach_part(rich, part)
+            end
+            rich
+          else
+            content.to_s
+          end
+        end
+
+        def attach_part(rich, part)
+          source = part["source"]
+          if source.is_a?(Hash)
+            case source["type"]
+            when "url"
+              rich.add_attachment(source["value"].to_s)
+            when "data"
+              io = StringIO.new(source["value"].to_s.unpack1("m"))
+              rich.add_attachment(io, filename: data_filename(source))
+            end
+          end
+        end
+
+        def data_filename(source)
+          ext = source["mimeType"].to_s.split("/").last.to_s
+          if ext.empty?
+            "attachment.bin"
+          else
+            "attachment.#{ext}"
           end
         end
 
@@ -205,10 +294,14 @@ describe "AgUi::Terminals::RubyLLM" do
   end
 
   fake_chat_class = Class.new do
-    attr_reader :instructions, :seeded, :tools, :messages
+    attr_reader :instructions, :seeded, :tools, :messages, :thinking_config
 
-    def initialize(chunks: [], final: "", tool_calls: nil)
+    FakeChunk = Struct.new(:content, :thinking)
+    FakeThinking = Struct.new(:text)
+
+    def initialize(chunks: [], final: "", tool_calls: nil, thinking_chunks: [])
       @chunks = chunks
+      @thinking_chunks = thinking_chunks
       @final = final
       @tool_calls = nil
       @final_tool_calls = tool_calls
@@ -216,6 +309,12 @@ describe "AgUi::Terminals::RubyLLM" do
       @seeded = []
       @tools = []
       @messages = []
+      @thinking_config = nil
+    end
+
+    def with_thinking(**config)
+      @thinking_config = config
+      self
     end
 
     def with_instructions(text, append: false)
@@ -239,7 +338,8 @@ describe "AgUi::Terminals::RubyLLM" do
     end
 
     def complete(&block)
-      @chunks.each { |c| block.call(Struct.new(:content).new(c)) }
+      @thinking_chunks.each { |t| block.call(FakeChunk.new(nil, FakeThinking.new(t))) }
+      @chunks.each { |c| block.call(FakeChunk.new(c, nil)) }
       add_message(role: :assistant, content: @final, tool_calls: @final_tool_calls)
       @messages.last
     end
@@ -322,6 +422,51 @@ describe "AgUi::Terminals::RubyLLM" do
     tool_seed = fake.seeded[2]
     tool_seed[:role].should == :tool
     tool_seed[:tool_call_id].should == "tc1"
+  end
+
+  it "streams thinking deltas as a reasoning phase closed before text" do
+    fake = fake_chat_class.new(
+      thinking_chunks: ["Let me ", "think..."],
+      chunks: ["The answer"],
+      final: "The answer",
+    )
+    terminal = AgUi::Terminals::RubyLLM.new(thinking: { budget: 1024 }, chat_factory: ->(**) { fake })
+
+    env = build_env.()
+    env[:messages].user("why?")
+    terminal.call(env)
+
+    fake.thinking_config.should == { budget: 1024 }
+    env[:events].map { |e| e[:type] }.should == %i[
+      reasoning_start reasoning_message_start
+      reasoning_message_content reasoning_message_content
+      reasoning_message_end reasoning_end
+      text_message_start text_message_content text_message_end
+    ]
+
+    reasoning_ids = env[:events].first(6).map { |e| e[:data][:message_id] }.uniq
+    reasoning_ids.length.should == 1
+    env[:events].last[:data][:message_id].should.not == reasoning_ids.first
+  end
+
+  it "seeds multimodal user content as ruby_llm Content with attachments" do
+    fake = fake_chat_class.new(final: "ok")
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    png = ["\x89PNG fake"].pack("m0")
+    env = build_env.()
+    env[:messages] << Brute::Message.new(role: :user, content: [
+      { "type" => "text", "text" => "what is this?" },
+      { "type" => "image", "source" => { "type" => "data", "value" => png, "mimeType" => "image/png" } },
+      { "type" => "document", "source" => { "type" => "url", "value" => "http://x/spec.pdf" } },
+    ])
+    terminal.call(env)
+
+    content = fake.seeded.first[:content]
+    content.should.be.kind_of(::RubyLLM::Content)
+    content.text.should == "what is this?"
+    content.attachments.length.should == 2
+    content.attachments.first.filename.should == "attachment.png"
   end
 
   it "splits host-app-style provider/model ids and defaults to anthropic" do
