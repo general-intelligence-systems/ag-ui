@@ -259,9 +259,13 @@ zero host-app coupling.
 - [x] Memory foundation: the store IS the per-thread persistence
       (`open_subscription` exposes full replay); redis/SQL adapters are a
       host-side store implementation
-- [ ] Delete the Node sidecar + proxy hop in the host app; env parity check
-      (`COPILOTKIT_MODEL`, `ANTHROPIC_API_KEY`, `AI_CATALOG_URL`) —
-      deployment-side, outside this repo
+- [x] **Cutover shipped** (host-app side): ag-ui 0.1.0 released to rubygems
+      and wired in-process behind the existing OIDC-gated controller (verbatim
+      sidecar prompt, catalog read from disk, sidecar kept on standby behind
+      `COPILOTKIT_PROXY_URL`); prod runs the runtime as a single-count falcon
+      service in the same pod (one run store) — the Node sidecar Deployment,
+      Service, and image are gone from the manifests. Verified working on the
+      live panel by the operator.
 
 ### Continuous (every phase)
 - [ ] Validate **every emitted event** against the ported schemas in dev/test —
