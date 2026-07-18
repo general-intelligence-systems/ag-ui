@@ -76,18 +76,25 @@ module AgUi
         @default_catalog_id = default_catalog_id || catalog&.catalog_id
       end
 
+      # Attempt cap for in-run regeneration (initial try + retries),
+      # matching the toolkit recovery default.
+      MAX_ATTEMPTS = ::AgUi::A2ui::Recovery::MAX_A2UI_ATTEMPTS
+
       def call(env)
-        env[:tools] = (env[:tools] || []) + [TOOL_DEFINITION]
+        advertise(env)
         inject_catalog_schema(env)
 
+        before = env[:messages].length
         @app.call(env)
 
-        last = env[:messages].last
-        if last.respond_to?(:tool_call?) && last.tool_call?
-          emitted_surfaces = Set.new
-          last.tool_calls.each do |tool_call|
+        # Only this iteration's assistant message — seeded history can
+        # carry old tool-call turns that must not re-render.
+        appended = env[:messages][before..] || []
+        assistant = appended.reverse.find { |m| m.respond_to?(:tool_call?) && m.tool_call? }
+        if assistant
+          assistant.tool_calls.each do |tool_call|
             if tool_call.name == TOOL_NAME
-              render(env[:events], tool_call, emitted_surfaces)
+              render(env, tool_call)
             end
           end
         end
@@ -97,6 +104,14 @@ module AgUi
 
       private
 
+        # Idempotent — the turn loop re-enters every iteration.
+        def advertise(env)
+          env[:tools] ||= []
+          unless env[:tools].any? { |t| t.is_a?(Hash) && t["name"] == TOOL_NAME }
+            env[:tools] << TOOL_DEFINITION
+          end
+        end
+
         # A catalog can carry an id without component schemas (the app may
         # teach the model its vocabulary through the system prompt instead)
         # — only inject and validate against components when they exist.
@@ -105,14 +120,19 @@ module AgUi
         end
 
         def inject_catalog_schema(env)
-          if catalog_components?
+          if catalog_components? && !metadata(env)[:a2ui_schema_injected]
             env[:messages].unshift(
               Brute::Message.new(
                 role: :system,
                 content: "#{SCHEMA_CONTEXT_PREAMBLE}\n#{JSON.generate(@catalog.components)}",
               ),
             )
+            metadata(env)[:a2ui_schema_injected] = true
           end
+        end
+
+        def metadata(env)
+          env[:metadata] ||= {}
         end
 
         # Components are validated with the ported a2ui_toolkit semantics
@@ -120,7 +140,13 @@ module AgUi
         # Bindings are NOT validated here — same as the Node middleware
         # (validateBindings: false): relative template paths resolve
         # per-item at render time and would false-positive.
-        def render(events, tool_call, emitted_surfaces)
+        #
+        # Failures regenerate IN-RUN: the structured errors are appended
+        # as the tool result and env[:should_exit] is cleared so
+        # Loop::ToolResult re-invokes the stack — status "retrying" on the
+        # wire, "failed" once MAX_ATTEMPTS is exhausted (Node-middleware
+        # status progression).
+        def render(env, tool_call)
           args = tool_call.arguments
           surface_id = args["surfaceId"].to_s
 
@@ -132,18 +158,40 @@ module AgUi
           )
 
           if surface_id.empty? || !validation["valid"]
-            failure = {
-              "status" => "failed",
-              "error" => "render_a2ui produced invalid components",
-              "errors" => validation["errors"],
-            }
-            events << activity(tool_call, failure)
-            events << result(tool_call, { "status" => "failed", "errors" => validation["errors"] })
+            render_failure(env, tool_call, validation["errors"])
           else
-            ops = operations(args, surface_id, emitted_surfaces)
-            events << activity(tool_call, { "a2ui_operations" => ops })
-            events << result(tool_call, { "status" => "rendered" })
+            ops = operations(args, surface_id, emitted_surfaces(env))
+            env[:events] << activity(tool_call, { "a2ui_operations" => ops })
+            env[:events] << result(tool_call, { "status" => "rendered" })
           end
+        end
+
+        def render_failure(env, tool_call, errors)
+          attempt = (metadata(env)[:a2ui_attempts] || 0) + 1
+          metadata(env)[:a2ui_attempts] = attempt
+          final = attempt >= MAX_ATTEMPTS
+
+          env[:events] << activity(
+            tool_call,
+            {
+              "status" => final ? "failed" : "retrying",
+              "attempt" => attempt,
+              "maxAttempts" => MAX_ATTEMPTS,
+              "errors" => errors,
+            },
+          )
+
+          content = { "status" => "failed", "errors" => errors }
+          env[:events] << result(tool_call, content)
+          env[:messages].tool(JSON.generate(content), tool_call_id: tool_call.id)
+
+          unless final
+            env[:should_exit] = false
+          end
+        end
+
+        def emitted_surfaces(env)
+          metadata(env)[:a2ui_surfaces] ||= Set.new
         end
 
         # createSurface once per surface within the turn; updateComponents
@@ -330,7 +378,7 @@ describe "AgUi::Middleware::A2ui" do
     second_ops.map(&:keys).flatten.should.not.include?("createSurface")
   end
 
-  it "ignores non-a2ui tool calls and marks malformed args failed" do
+  it "ignores non-a2ui tool calls; malformed render args enter the retry path" do
     terminal = ->(env) do
       env[:messages] << Brute::Message.new(
         role: :assistant, content: nil,
@@ -341,31 +389,54 @@ describe "AgUi::Middleware::A2ui" do
       )
     end
 
-    env = { messages: Brute.log, events: [], tools: [] }
+    env = { messages: Brute.log, events: [], tools: [], should_exit: true }
     AgUi::Middleware::A2ui.new(terminal, catalog: catalog).call(env)
 
     env[:events].length.should == 2
-    env[:events][0][:data][:content]["status"].should == "failed"
+    env[:events][0][:data][:content]["status"].should == "retrying"
     JSON.parse(env[:events][1][:data][:content])["status"].should == "failed"
+    env[:messages].last.role.should == :tool
+    env[:messages].last.tool_call_id.should == "tc2"
+    env[:should_exit].should == false
   end
 
-  it "rejects semantically invalid trees via the toolkit validator" do
-    terminal = ->(env) do
-      env[:messages] << render_call.(
-        "surfaceId" => "s1",
-        "components" => [
-          { "id" => "root", "component" => "Mystery", "children" => ["ghost"] },
-        ],
+  it "rejects invalid trees with structured errors, failing hard at the attempt cap" do
+    invalid = ->(id) do
+      Brute::Message.new(
+        role: :assistant, content: nil,
+        tool_calls: [{ id: id, name: "render_a2ui", arguments: {
+          "surfaceId" => "s1",
+          "components" => [{ "id" => "root", "component" => "Mystery", "children" => ["ghost"] }],
+        } }],
       )
     end
 
-    env = { messages: Brute.log, events: [], tools: [] }
-    AgUi::Middleware::A2ui.new(terminal, catalog: catalog).call(env)
+    calls = 0
+    terminal = ->(env) do
+      calls += 1
+      env[:messages] << invalid.("tc#{calls}")
+    end
 
-    content = env[:events][0][:data][:content]
-    content["status"].should == "failed"
-    codes = content["errors"].map { |e| e["code"] }
+    env = { messages: Brute.log, events: [], tools: [], metadata: {} }
+    mw = AgUi::Middleware::A2ui.new(terminal, catalog: catalog)
+
+    mw.call(env)
+    first = env[:events][0][:data][:content]
+    first["status"].should == "retrying"
+    first["attempt"].should == 1
+    codes = first["errors"].map { |e| e["code"] }
     codes.should.include?("unknown_component")
     codes.should.include?("unresolved_child")
+    env[:should_exit].should == false
+
+    env[:should_exit] = true
+    mw.call(env)
+    env[:should_exit] = true
+    mw.call(env)
+
+    statuses = env[:events].select { |e| e[:type] == :activity_snapshot }
+      .map { |e| e[:data][:content]["status"] }
+    statuses.should == %w[retrying retrying failed]
+    env[:should_exit].should == true
   end
 end

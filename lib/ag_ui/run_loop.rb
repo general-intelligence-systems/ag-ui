@@ -28,7 +28,11 @@ module AgUi
   class RunLoop
     # a2ui: nil/false = off; an AgUi::A2ui::Catalog = on with that catalog;
     # true = on degraded (tool injected, no component schema).
-    def initialize(system_prompt: nil, validate: true, middleware: [], a2ui: nil, &terminal)
+    # server_tools: [{name:, description:, parameters:, handler:}] execute
+    # inline and the turn loops (Loop::ToolResult) until the model answers
+    # in text, a client tool defers to the browser, or max_iterations hits.
+    def initialize(system_prompt: nil, validate: true, middleware: [], a2ui: nil,
+                   server_tools: [], max_iterations: 10, &terminal)
       unless terminal
         raise ArgumentError, "RunLoop requires a terminal block (the LLM call)"
       end
@@ -37,6 +41,8 @@ module AgUi
       @validate = validate
       @middleware = middleware
       @a2ui = a2ui
+      @server_tools = server_tools
+      @max_iterations = max_iterations
       @terminal = terminal
     end
 
@@ -87,11 +93,14 @@ module AgUi
           prompt: @system_prompt,
           context: input.context,
         )
+        agent.use(AgUi::Middleware::ForwardedProps, props: input.forwarded_props)
+        agent.use(Brute::Middleware::Loop::ToolResult)
+        agent.use(Brute::Middleware::MaxIterations, max_iterations: @max_iterations)
         if a2ui_enabled?
           catalog = @a2ui.is_a?(AgUi::A2ui::Catalog) ? @a2ui : nil
           agent.use(AgUi::Middleware::A2ui, catalog: catalog)
         end
-        agent.use(AgUi::Middleware::ToolRouter, tools: input.tools)
+        agent.use(AgUi::Middleware::ToolRouter, tools: input.tools, server_tools: @server_tools)
         @middleware.each do |(klass, options)|
           agent.use(klass, **(options || {}))
         end
@@ -187,6 +196,49 @@ describe "AgUi::RunLoop" do
 
   it "requires a terminal block" do
     lambda { AgUi::RunLoop.new }.should.raise(ArgumentError)
+  end
+
+  it "executes server tools inline and loops the turn to completion" do
+    weather_tool = {
+      name: "get_weather",
+      description: "Weather for a city",
+      parameters: { "type" => "object" },
+      handler: ->(args) { { "city" => args["city"], "temp" => 21 } },
+    }
+
+    iterations = 0
+    terminal = ->(env) do
+      iterations += 1
+      if iterations == 1
+        env[:messages] << Brute::Message.new(
+          role: :assistant, content: nil,
+          tool_calls: [{ id: "tc1", name: "get_weather", arguments: { "city" => "Lisbon" } }],
+        )
+      else
+        # The model sees its own call + the executed result.
+        env[:messages].last.role.should == :tool
+        env[:messages].last.content.should == "{\"city\":\"Lisbon\",\"temp\":21}"
+        env[:events] << { type: :text_message_start, data: { message_id: "m2" } }
+        env[:events] << { type: :text_message_content, data: { message_id: "m2", delta: "21C in Lisbon" } }
+        env[:events] << { type: :text_message_end, data: { message_id: "m2" } }
+        env[:messages].assistant("21C in Lisbon")
+      end
+    end
+
+    run_loop = AgUi::RunLoop.new(server_tools: [weather_tool], &terminal)
+    app = AgUi.agent(agent_id: "default", &run_loop)
+
+    _status, _headers, stream = request.(app, minimal_input)
+    frames = read_frames.(stream)
+
+    iterations.should == 2
+    frames.map { |f| f["type"] }.should == %w[
+      RUN_STARTED
+      TOOL_CALL_START TOOL_CALL_ARGS TOOL_CALL_END TOOL_CALL_RESULT
+      TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT TEXT_MESSAGE_END
+      RUN_FINISHED
+    ]
+    frames[4]["content"].should == "{\"city\":\"Lisbon\",\"temp\":21}"
   end
 
   it "streams the full A2UI sequence when the model renders a surface" do

@@ -236,13 +236,19 @@ zero host-app coupling.
       streamed real deltas then the answer (`examples/claude.rb`)
 
 ### Phase 6 — Tail (post-cutover)
-- [ ] Server tools: registry + inline execution via the brute `ToolPipeline`
-      path — emit `TOOL_CALL_RESULT` `{messageId, toolCallId, content:<string>}`,
-      loop continues (`Loop::ToolResult`)
-- [ ] Suggestions: reverse-engineer `use-configure-suggestions`/`use-suggestions`
-      in `@copilotkit/react-core/v2`; implement as a run variant with
-      `ruby_llm` structured output (`[{title, message}]`) — static path is the
-      fallback meanwhile
+- [x] Server tools: `RunLoop(server_tools: [{name:, description:, parameters:,
+      handler:}])` — `ToolRouter` executes inline, emits `TOOL_CALL_RESULT`
+      (Node shape), appends the `:tool` message; `Loop::ToolResult` +
+      `MaxIterations` drive the turn — LIVE: weather question executed the
+      tool and continued the same run with the answer
+- [x] A2UI in-run retry rides the loop: invalid renders emit
+      `retrying`/`failed` status activities (Node progression), append the
+      structured errors as the tool result, and regenerate up to the
+      toolkit's attempt cap
+- [x] Suggestions: contract settled from v2 source (doc 05) — server side is
+      `forwardedProps.toolChoice` honoring (`ForwardedProps` middleware +
+      terminal `with_tools(choice:)`) — LIVE: forced `copilotkitSuggest`
+      returned 3 `{title, message}` pills in the client's exact shape
 - [ ] `/connect` for real: resume/reattach against a run store
 - [ ] Memory: thread persistence keyed by `threadId` (redis+SQL)
 - [ ] Delete `sidecars/copilotkit/` + Node deps + Vite proxy hop; env parity

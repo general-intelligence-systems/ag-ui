@@ -25,8 +25,23 @@ terminal = AgUi::Terminals::RubyLLM.new(
   thinking: thinking_budget ? { budget: Integer(thinking_budget, 10) } : nil,
 )
 
+# A demo SERVER tool — executes inline; the model continues the same run
+# with the result (Loop::ToolResult).
+WEATHER = {
+  name: "get_weather",
+  description: "Get the current weather for a city. Call this whenever the " \
+               "user asks about weather.",
+  parameters: {
+    "type" => "object",
+    "properties" => { "city" => { "type" => "string" } },
+    "required" => ["city"],
+  },
+  handler: ->(args) { { "city" => args["city"], "conditions" => "sunny", "temp_c" => 21 } },
+}.freeze
+
 run_loop = AgUi::RunLoop.new(
   system_prompt: "You are a helpful assistant. Answer concisely.",
+  server_tools: [WEATHER],
   &terminal
 )
 

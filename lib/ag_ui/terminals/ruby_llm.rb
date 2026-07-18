@@ -41,6 +41,7 @@ module AgUi
           chat.with_thinking(**@thinking)
         end
         register_client_tools(chat, env[:tools])
+        apply_tool_choice(chat, env)
         seed(chat, env[:messages])
 
         emitter = TurnEmitter.new(env[:events])
@@ -160,6 +161,18 @@ module AgUi
 
         def default_chat_factory
           ->(model:, provider:) { ::RubyLLM.chat(model: model, provider: provider) }
+        end
+
+        # forwardedProps.toolChoice ({type: "function", function: {name}})
+        # forces the named tool — the suggestions engine relies on this to
+        # force copilotkitSuggest.
+        def apply_tool_choice(chat, env)
+          props = env[:forwarded_props]
+          choice = props.is_a?(Hash) ? props["toolChoice"] : nil
+          name = choice.is_a?(Hash) ? choice.dig("function", "name") : nil
+          if name
+            chat.with_tools(choice: name)
+          end
         end
 
         def register_client_tools(chat, tools)
@@ -327,6 +340,14 @@ describe "AgUi::Terminals::RubyLLM" do
       self
     end
 
+    attr_reader :tool_choice
+
+    def with_tools(*tools, choice: nil, **)
+      @tools.concat(tools)
+      @tool_choice = choice
+      self
+    end
+
     def add_message(attributes)
       @seeded << attributes
       @messages << Struct.new(:role, :content, :tool_calls, keyword_init: true) do
@@ -422,6 +443,19 @@ describe "AgUi::Terminals::RubyLLM" do
     tool_seed = fake.seeded[2]
     tool_seed[:role].should == :tool
     tool_seed[:tool_call_id].should == "tc1"
+  end
+
+  it "forces the tool named by forwardedProps.toolChoice" do
+    fake = fake_chat_class.new(final: "ok")
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    env = build_env.()
+    env[:forwarded_props] = {
+      "toolChoice" => { "type" => "function", "function" => { "name" => "copilotkitSuggest" } },
+    }
+    terminal.call(env)
+
+    fake.tool_choice.should == "copilotkitSuggest"
   end
 
   it "streams thinking deltas as a reasoning phase closed before text" do
