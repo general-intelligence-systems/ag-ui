@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp@latest",
+        "--executablePath=/run/current-system/sw/bin/google-chrome-stable"
+      ],
+      "env": {}
+    }
+  }
+}

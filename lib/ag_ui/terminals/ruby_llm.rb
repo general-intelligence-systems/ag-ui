@@ -1,0 +1,379 @@
+# frozen_string_literal: true
+
+require "bundler/setup"
+require "securerandom"
+require "ag_ui"
+require "ruby_llm"
+
+module AgUi
+  module Terminals
+    # The ruby_llm terminal — the LLM call at the bottom of the brute
+    # pipeline. NOT required by lib/ag_ui.rb (the gem core stays
+    # LLM-agnostic); opt in with:
+    #
+    #   require "ag_ui/terminals/ruby_llm"
+    #
+    #   RubyLLM.configure { |c| c.anthropic_api_key = ENV["ANTHROPIC_API_KEY"] }
+    #   run_loop = AgUi::RunLoop.new(system_prompt: PROMPT,
+    #                                &AgUi::Terminals::RubyLLM.new)
+    #
+    # One assistant turn per call: seeds the chat from env[:messages]
+    # (including prior tool-call turns), registers env[:tools] as
+    # schema-only CLIENT tools (they halt — never execute server-side),
+    # streams text deltas into env[:events], then appends either the
+    # assistant text or the assistant tool-call message to env[:messages]
+    # for the ToolRouter to route.
+    #
+    # Accepts the host app's "anthropic/claude-sonnet-4-5" env form or a bare
+    # ruby_llm model id.
+    class RubyLLM
+      def initialize(model: "anthropic/claude-sonnet-4-5", chat_factory: nil)
+        @provider, @model = split_model(model)
+        @chat_factory = chat_factory || default_chat_factory
+      end
+
+      def call(env)
+        chat = @chat_factory.call(model: @model, provider: @provider)
+        register_client_tools(chat, env[:tools])
+        seed(chat, env[:messages])
+
+        emitter = TextEmitter.new(env[:events])
+        chat.complete { |chunk| emitter.delta(chunk.content.to_s) }
+        emitter.finish
+
+        conclude(chat, env)
+        env
+      end
+
+      def to_proc
+        method(:call).to_proc
+      end
+
+      # A client tool: full schema for the provider, no server execution.
+      # When the model calls it, execution "halts" ruby_llm's auto tool
+      # loop — the assistant tool-call message is already in chat.messages
+      # and the browser owns the actual execution (doc 03 multi-run model).
+      class ClientTool < ::RubyLLM::Tool
+        def initialize(name:, description:, parameters:)
+          @client_name = name
+          @client_description = description
+          @client_schema = parameters
+          super()
+        end
+
+        def name = @client_name
+        def description = @client_description
+        def params_schema = @client_schema
+
+        # Bypass arg validation entirely — the browser is the executor
+        # and the next run carries its result back in history.
+        def call(_args)
+          halt("(deferred to client)")
+        end
+      end
+
+      # Emits TEXT_MESSAGE_START lazily on the first non-empty delta, so
+      # tool-call-only turns don't produce an empty message bubble.
+      class TextEmitter
+        def initialize(events)
+          @events = events
+          @message_id = SecureRandom.uuid
+          @started = false
+        end
+
+        def delta(text)
+          unless text.empty?
+            unless @started
+              @events << { type: :text_message_start, data: { message_id: @message_id } }
+              @started = true
+            end
+            @events << {
+              type: :text_message_content,
+              data: { message_id: @message_id, delta: text },
+            }
+          end
+        end
+
+        def finish
+          if @started
+            @events << { type: :text_message_end, data: { message_id: @message_id } }
+          end
+        end
+      end
+
+      private
+
+        def split_model(model)
+          if model.include?("/")
+            provider, id = model.split("/", 2)
+            [provider.to_sym, id]
+          else
+            [:anthropic, model]
+          end
+        end
+
+        def default_chat_factory
+          ->(model:, provider:) { ::RubyLLM.chat(model: model, provider: provider) }
+        end
+
+        def register_client_tools(chat, tools)
+          (tools || []).each do |tool|
+            chat.with_tool(
+              ClientTool.new(
+                name: dig_tool(tool, "name"),
+                description: dig_tool(tool, "description"),
+                parameters: dig_tool(tool, "parameters"),
+              ),
+            )
+          end
+        end
+
+        # RunAgentInput.tools arrive as JsonSchema Definitions; accept
+        # plain wire hashes too.
+        def dig_tool(tool, key)
+          if tool.respond_to?(:to_h)
+            tool.to_h[key]
+          else
+            tool[key]
+          end
+        end
+
+        # Seed the chat from the brute log. System content goes through
+        # with_instructions (providers hoist it correctly); assistant
+        # tool-call turns and tool results are replayed so the model sees
+        # its prior calls and doesn't repeat them.
+        def seed(chat, messages)
+          messages.each do |message|
+            case message.role
+            when :system
+              chat.with_instructions(message.content.to_s, append: true)
+            when :user
+              chat.add_message(role: :user, content: message.content.to_s)
+            when :assistant
+              seed_assistant(chat, message)
+            when :tool
+              chat.add_message(
+                role: :tool,
+                content: message.content.to_s,
+                tool_call_id: message.tool_call_id,
+              )
+            end
+          end
+        end
+
+        def seed_assistant(chat, message)
+          if message.tool_call?
+            tool_calls = message.tool_calls.to_h do |tc|
+              [tc.id, ::RubyLLM::ToolCall.new(id: tc.id, name: tc.name, arguments: tc.arguments)]
+            end
+            chat.add_message(role: :assistant, content: message.content.to_s, tool_calls: tool_calls)
+          else
+            chat.add_message(role: :assistant, content: message.content.to_s)
+          end
+        end
+
+        # After the turn: did the model end on tool calls or text? The
+        # halting ClientTool leaves the assistant tool-call message in
+        # chat.messages (followed by the synthetic halt result) — surface
+        # it as a brute message for the ToolRouter.
+        def conclude(chat, env)
+          assistant = chat.messages.reverse.find { |m| m.role == :assistant }
+
+          if assistant&.tool_call?
+            env[:messages] << Brute::Message.new(
+              role: :assistant,
+              content: assistant.content.to_s,
+              tool_calls: assistant.tool_calls.each_value.map do |tc|
+                { id: tc.id, name: tc.name, arguments: tc.arguments }
+              end,
+            )
+          else
+            env[:messages].assistant(assistant ? assistant.content.to_s : "")
+          end
+        end
+    end
+  end
+end
+
+__END__
+
+describe "AgUi::Terminals::RubyLLM" do
+  fake_message = Struct.new(:role, :content, :tool_calls, keyword_init: true) do
+    def tool_call?
+      !tool_calls.nil? && !tool_calls.empty?
+    end
+  end
+
+  fake_chat_class = Class.new do
+    attr_reader :instructions, :seeded, :tools, :messages
+
+    def initialize(chunks: [], final: "", tool_calls: nil)
+      @chunks = chunks
+      @final = final
+      @tool_calls = nil
+      @final_tool_calls = tool_calls
+      @instructions = []
+      @seeded = []
+      @tools = []
+      @messages = []
+    end
+
+    def with_instructions(text, append: false)
+      @instructions << text
+      self
+    end
+
+    def with_tool(tool)
+      @tools << tool
+      self
+    end
+
+    def add_message(attributes)
+      @seeded << attributes
+      @messages << Struct.new(:role, :content, :tool_calls, keyword_init: true) do
+        def tool_call?
+          !tool_calls.nil? && !tool_calls.empty?
+        end
+      end.new(role: attributes[:role], content: attributes[:content], tool_calls: attributes[:tool_calls])
+      self
+    end
+
+    def complete(&block)
+      @chunks.each { |c| block.call(Struct.new(:content).new(c)) }
+      add_message(role: :assistant, content: @final, tool_calls: @final_tool_calls)
+      @messages.last
+    end
+  end
+
+  build_env = -> do
+    { messages: Brute.log, events: [], metadata: {}, current_iteration: 1 }
+  end
+
+  it "streams deltas into env[:events] and appends the assistant message" do
+    fake = fake_chat_class.new(chunks: ["Hel", "", "lo"], final: "Hello")
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    env = build_env.()
+    env[:messages].user("hi")
+    terminal.call(env)
+
+    types = env[:events].map { |e| e[:type] }
+    types.should == [:text_message_start, :text_message_content, :text_message_content, :text_message_end]
+    env[:events][1][:data][:delta].should == "Hel"
+
+    env[:messages].last.role.should == :assistant
+    env[:messages].last.content.should == "Hello"
+  end
+
+  it "registers env[:tools] as schema-only halting client tools" do
+    fake = fake_chat_class.new(final: "ok")
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    env = build_env.()
+    env[:tools] = [{ "name" => "navigate", "description" => "Go somewhere",
+                     "parameters" => { "type" => "object" } }]
+    terminal.call(env)
+
+    tool = fake.tools.first
+    tool.name.should == "navigate"
+    tool.description.should == "Go somewhere"
+    tool.params_schema.should == { "type" => "object" }
+    tool.call({ "path" => "/x" }).should.be.kind_of(::RubyLLM::Tool::Halt)
+  end
+
+  it "surfaces a tool-call turn as a brute assistant message with tool_calls" do
+    tool_calls = {
+      "tc1" => ::RubyLLM::ToolCall.new(id: "tc1", name: "navigate",
+                                       arguments: { "path" => "/data" }),
+    }
+    fake = fake_chat_class.new(final: nil, tool_calls: tool_calls)
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    env = build_env.()
+    env[:messages].user("go to data")
+    terminal.call(env)
+
+    # No text events for a tool-only turn (lazy start).
+    env[:events].should == []
+
+    last = env[:messages].last
+    last.tool_call?.should.be.true
+    last.tool_calls.first.id.should == "tc1"
+    last.tool_calls.first.arguments.should == { "path" => "/data" }
+  end
+
+  it "seeds prior tool-call turns and tool results back into the chat" do
+    fake = fake_chat_class.new(final: "done")
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    env = build_env.()
+    env[:messages] << Brute::Message.new(role: :user, content: "go")
+    env[:messages] << Brute::Message.new(
+      role: :assistant, content: nil,
+      tool_calls: [{ id: "tc1", name: "navigate", arguments: { "path" => "/data" } }],
+    )
+    env[:messages] << Brute::Message.new(role: :tool, content: "{\"ok\":true}", tool_call_id: "tc1")
+    terminal.call(env)
+
+    assistant_seed = fake.seeded[1]
+    assistant_seed[:role].should == :assistant
+    assistant_seed[:tool_calls]["tc1"].name.should == "navigate"
+
+    tool_seed = fake.seeded[2]
+    tool_seed[:role].should == :tool
+    tool_seed[:tool_call_id].should == "tc1"
+  end
+
+  it "splits host-app-style provider/model ids and defaults to anthropic" do
+    captured = []
+    factory = ->(model:, provider:) do
+      captured << [provider, model]
+      fake_chat_class.new(final: "ok")
+    end
+
+    AgUi::Terminals::RubyLLM.new(model: "anthropic/claude-sonnet-4-5", chat_factory: factory)
+      .call(build_env.())
+    AgUi::Terminals::RubyLLM.new(model: "claude-sonnet-4-5", chat_factory: factory)
+      .call(build_env.())
+    captured.should == [[:anthropic, "claude-sonnet-4-5"], [:anthropic, "claude-sonnet-4-5"]]
+  end
+
+  it "drives the full client-tool run through RunLoop + ToolRouter" do
+    tool_calls = {
+      "tc1" => ::RubyLLM::ToolCall.new(id: "tc1", name: "navigate",
+                                       arguments: { "path" => "/data" }),
+    }
+    fake = fake_chat_class.new(final: nil, tool_calls: tool_calls)
+    terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
+
+    run_loop = AgUi::RunLoop.new(system_prompt: "Be terse.", &terminal)
+    app = AgUi.agent(agent_id: "default", &run_loop)
+
+    body = JSON.generate({
+      "threadId" => "t1", "runId" => "r1", "state" => nil,
+      "messages" => [{ "id" => "u1", "role" => "user", "content" => "go to data" }],
+      "tools" => [{ "name" => "navigate", "description" => "Go", "parameters" => { "type" => "object" } }],
+      "context" => [], "forwardedProps" => nil,
+    })
+    _status, _headers, stream = app.call({
+      "REQUEST_METHOD" => "POST",
+      "PATH_INFO" => "/agent/default/run",
+      "rack.input" => StringIO.new(body),
+    })
+
+    frames = []
+    while (chunk = stream.read)
+      frames << JSON.parse(chunk.sub(/\Adata: /, "").strip)
+    end
+
+    frames.map { |f| f["type"] }.should == %w[
+      RUN_STARTED TOOL_CALL_START TOOL_CALL_ARGS TOOL_CALL_END RUN_FINISHED
+    ]
+    frames[1]["toolCallId"].should == "tc1"
+    frames[1]["toolCallName"].should == "navigate"
+    frames[2]["delta"].should == "{\"path\":\"/data\"}"
+
+    # Plain RUN_FINISHED — no result, no outcome (doc 09 §4).
+    frames.last.should == { "type" => "RUN_FINISHED", "threadId" => "t1", "runId" => "r1" }
+  end
+end

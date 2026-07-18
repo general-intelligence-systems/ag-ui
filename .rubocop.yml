@@ -1,0 +1,60 @@
+inherit_from: .rubocop_todo.yml
+
+require:
+  - ./cops/begin_block_assignment.rb
+  - ./cops/no_modifier_if.rb
+  - ./cops/no_return.rb
+
+AllCops:
+  DisabledByDefault: true
+  NewCops: disable
+  SuggestExtensions: false
+  TargetRubyVersion: 3.3
+  Exclude:
+    - vendor/**/*
+    - tmp/**/*
+    - pkg/**/*
+
+# Bans `lvar = begin ... end`. Force
+#   begin
+#     lvar = ...
+#   rescue ...
+#   end
+# so the rescue/ensure clauses aren't hidden behind an assignment target.
+Local/BeginBlockAssignment:
+  Enabled: true
+
+# Bans modifier `if` / `unless` (trailing conditional). Force full block
+# form so guards can't hide off the right edge of a long line.
+Local/NoModifierIf:
+  Enabled: true
+
+# Bans the `return` keyword. The method's last expression is its return
+# value; guards must be structural (if/unless/case), not short-circuits.
+Local/NoReturn:
+  Enabled: true
+
+# Multi-line method calls: arg #1 on its own line, every subsequent arg too.
+# Bans:
+#   engine.handle_failure(task_id, worker_id,
+#                         error_message: "...",
+#                         retries:       0)
+# In favour of:
+#   engine.handle_failure(
+#     task_id,
+#     worker_id,
+#     error_message: "...",
+#     retries: 0,
+#   )
+Layout/FirstMethodArgumentLineBreak:
+  Enabled: true
+
+Layout/MultilineMethodArgumentLineBreaks:
+  Enabled: true
+
+# Same rule for hash literals.
+Layout/FirstHashElementLineBreak:
+  Enabled: true
+
+Layout/MultilineHashKeyLineBreaks:
+  Enabled: true
