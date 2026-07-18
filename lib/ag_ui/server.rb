@@ -33,8 +33,12 @@ module AgUi
   class Server
     JSON_HEADERS = { "content-type" => "application/json" }.freeze
 
+    # store: run bookkeeping for /connect replay + /stop cancellation.
+    # Defaults to the in-memory store; pass store: nil for the stateless
+    # stub behaviour (connect closes immediately, stop only acks).
     def initialize(agent_id: "default", description: nil, a2ui_enabled: false,
-                   info_overrides: {}, validate: true, &block)
+                   info_overrides: {}, validate: true,
+                   store: RunStore::InMemory.new, &block)
       unless block
         raise ArgumentError, "Server requires a run-handler block"
       end
@@ -47,6 +51,7 @@ module AgUi
         overrides: info_overrides,
       )
       @validate = validate
+      @store = store
       @handler = block
       @app = build_app
     end
@@ -82,8 +87,12 @@ module AgUi
 
       # The handler opens env["ag_ui.stream"]; the opened stream becomes
       # the response body — Falcon streams it natively while the run's
-      # Async fiber keeps writing.
+      # Async fiber keeps writing. With a store, the builder is wrapped so
+      # every event is recorded and the run's task handle registered.
       def respond_run(env)
+        if @store
+          env["ag_ui.stream"] = RecordingBuilder.new(env["ag_ui.stream"], @store)
+        end
         @handler.call(env)
 
         stream = env["ag_ui.stream"]
@@ -98,24 +107,73 @@ module AgUi
         [500, JSON_HEADERS.dup, [JSON.generate({ "error" => "Internal error" })]]
       end
 
-      # Resume stub, matching the Node runtime's unknown-thread behaviour:
-      # 200 text/event-stream that completes immediately (zero events).
+      # Resume/reattach (doc 09 §2): replay everything recorded for the
+      # thread, then — when a run is in flight — stream its events live
+      # until it finishes. Unknown thread (or no store): 200 SSE that
+      # completes immediately, the Node runtime's exact behaviour.
       def respond_connect(env)
         input = env["ag_ui.input"]
+        thread_id = input&.thread_id.to_s
         stream = SSE::Stream.new(
-          thread_id: input&.thread_id.to_s,
+          thread_id: thread_id,
           run_id: input&.run_id.to_s,
-          validate: @validate,
+          validate: false,
         )
-        stream.finish
+
+        if @store
+          replay(stream, @store.open_subscription(thread_id))
+        else
+          stream.finish
+        end
 
         [200, SSE::Stream.headers, stream]
       end
 
-      # Acknowledge the stop. Run cancellation lands with the run loop —
-      # transport-level contract is a 200 JSON ack.
-      def respond_stop(_env)
-        [200, JSON_HEADERS.dup, [JSON.generate({})]]
+      def replay(stream, subscription)
+        Async do
+          subscription[:events].each { |payload| stream.event(payload) }
+          queue = subscription[:queue]
+          if queue
+            loop do
+              item = queue.dequeue
+              if item == RunStore::InMemory::FINISHED
+                break
+              end
+              stream.event(item)
+            end
+          end
+        ensure
+          stream.finish
+        end
+      end
+
+      # Cancel the thread's in-flight run (the store stops its Async
+      # task; the stream closes via the builder's ensure) and ack.
+      def respond_stop(env)
+        stopped = @store ? @store.stop(env["ag_ui.thread_id"].to_s) : false
+        [200, JSON_HEADERS.dup, [JSON.generate({ "stopped" => stopped })]]
+      end
+
+      # Wraps the StreamBuilder so opened runs record into the store.
+      class RecordingBuilder
+        def initialize(builder, store)
+          @builder = builder
+          @store = store
+        end
+
+        def open(thread_id:, run_id:, validate: true, &block)
+          @store.begin_run(thread_id, run_id)
+
+          @builder.open(
+            thread_id: thread_id,
+            run_id: run_id,
+            validate: validate,
+            on_event: ->(payload) { @store.record(thread_id, payload) },
+            on_finish: -> { @store.finish_run(thread_id) },
+            on_task: ->(task) { @store.attach_task(thread_id, task) },
+            &block
+          )
+        end
       end
   end
 
@@ -196,10 +254,39 @@ describe "AgUi::Server" do
     body.read.should.be.nil
   end
 
-  it "acks /stop with 200 JSON" do
+  it "acks /stop with 200 JSON (stopped: false when no run is live)" do
     status, _headers, body = request.(echo_agent, "POST", "/agent/default/stop/t1")
     status.should == 200
-    JSON.parse(body.first).should == {}
+    JSON.parse(body.first).should == { "stopped" => false }
+  end
+
+  it "replays a recorded run on /connect for the same thread" do
+    agent = AgUi.agent(agent_id: "default") do |env|
+      input = env["ag_ui.input"]
+      env["ag_ui.stream"].open(thread_id: input.thread_id, run_id: input.run_id) do |s|
+        s.run_started
+        s.text_message_start(message_id: "m1")
+        s.text_message_content(message_id: "m1", delta: "recorded")
+        s.text_message_end(message_id: "m1")
+        s.run_finished
+      end
+    end
+
+    _status, _headers, run_stream = request.(agent, "POST", "/agent/default/run", body: minimal_input)
+    read_frames.(run_stream).length.should == 5
+
+    _status, headers, connect_stream = request.(agent, "POST", "/agent/default/connect", body: minimal_input)
+    headers["content-type"].should == "text/event-stream"
+    frames = read_frames.(connect_stream)
+    frames.map { |f| f["type"] }.should == %w[
+      RUN_STARTED TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT TEXT_MESSAGE_END RUN_FINISHED
+    ]
+    frames[2]["delta"].should == "recorded"
+
+    # A different thread replays nothing.
+    other = minimal_input.sub("\"t1\"", "\"t-other\"")
+    _status, _headers, empty_stream = request.(agent, "POST", "/agent/default/connect", body: other)
+    read_frames.(empty_stream).should == []
   end
 
   it "returns 400 for an invalid run body" do

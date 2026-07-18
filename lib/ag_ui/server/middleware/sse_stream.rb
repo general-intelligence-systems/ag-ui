@@ -59,16 +59,28 @@ module AgUi
         # when the block exits, even if an exception is raised. The run
         # handler owns terminal-event semantics (RUN_FINISHED / RUN_ERROR)
         # — this layer only guarantees the connection closes.
-        def open(thread_id:, run_id:, validate: true, &block)
-          stream = SSE::Stream.new(thread_id: thread_id, run_id: run_id, validate: validate)
+        #
+        # on_event / on_finish / on_task are the run-store taps (set by
+        # the Server's recording wrapper): every payload, end-of-run, and
+        # the Async task handle for /stop cancellation.
+        def open(thread_id:, run_id:, validate: true,
+                 on_event: nil, on_finish: nil, on_task: nil, &block)
+          stream = SSE::Stream.new(
+            thread_id: thread_id,
+            run_id: run_id,
+            validate: validate,
+            on_event: on_event,
+          )
 
           @env["ag_ui.stream"] = stream
 
-          Async do
+          task = Async do
             block.call(stream)
           ensure
             stream.finish
+            on_finish&.call
           end
+          on_task&.call(task)
 
           nil
         end

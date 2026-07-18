@@ -41,16 +41,20 @@ module AgUi
 
         attr_reader :thread_id, :run_id
 
-        def initialize(thread_id:, run_id:, validate: true, **options)
+        # on_event: optional tap receiving every wire payload — the run
+        # store records through it for /connect replay.
+        def initialize(thread_id:, run_id:, validate: true, on_event: nil, **options)
           @thread_id = thread_id
           @run_id    = run_id
           @validate  = validate
+          @on_event  = on_event
           @encoder   = EventEncoder.new
           super(**options)
         end
 
         # Emit a pre-built event payload (Hash with camelCase keys).
         def event(payload)
+          @on_event&.call(payload)
           write(@encoder.encode(payload))
         end
 

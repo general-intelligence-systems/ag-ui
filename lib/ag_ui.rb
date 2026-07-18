@@ -16,6 +16,7 @@ require "ag_ui/server/sse/event_encoder"
 require "ag_ui/server/sse/stream"
 require "ag_ui/server/middleware/sse_stream"
 require "ag_ui/run_input"
+require "ag_ui/run_store"
 require "ag_ui/server"
 
 require "brute"

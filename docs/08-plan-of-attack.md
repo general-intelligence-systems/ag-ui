@@ -249,10 +249,19 @@ zero host-app coupling.
       `forwardedProps.toolChoice` honoring (`ForwardedProps` middleware +
       terminal `with_tools(choice:)`) — LIVE: forced `copilotkitSuggest`
       returned 3 `{title, message}` pills in the client's exact shape
-- [ ] `/connect` for real: resume/reattach against a run store
-- [ ] Memory: thread persistence keyed by `threadId` (redis+SQL)
-- [ ] Delete `sidecars/copilotkit/` + Node deps + Vite proxy hop; env parity
-      check (`COPILOTKIT_MODEL`, `ANTHROPIC_API_KEY`, `AI_CATALOG_URL`)
+- [x] `/connect` for real: `RunStore::InMemory` (duck-typed, host-pluggable)
+      records every wire payload; connect replays historic + live events with
+      an ATOMIC snapshot+subscribe (no gap/dup), attaches live via
+      Async::Queue fanout — LIVE: mid-run connect received the full stream;
+      unknown thread returns the empty-close
+- [x] `/stop` for real: the store cancels the run's Async task — LIVE:
+      mid-run stop returned `{"stopped":true}` and both streams closed
+- [x] Memory foundation: the store IS the per-thread persistence
+      (`open_subscription` exposes full replay); redis/SQL adapters are a
+      host-side store implementation
+- [ ] Delete the Node sidecar + proxy hop in the host app; env parity check
+      (`COPILOTKIT_MODEL`, `ANTHROPIC_API_KEY`, `AI_CATALOG_URL`) —
+      deployment-side, outside this repo
 
 ### Continuous (every phase)
 - [ ] Validate **every emitted event** against the ported schemas in dev/test —
