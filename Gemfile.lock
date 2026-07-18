@@ -1,22 +1,9 @@
 PATH
-  remote: ../brute
-  specs:
-    brute (3.0.0)
-      activesupport
-      async (~> 2.0)
-      colorize-extended
-      diff-lcs (>= 1.5)
-      google-protobuf (~> 4.34)
-      json_schemer (~> 2.5)
-      net-http-persistent
-      rack (~> 3.0)
-
-PATH
   remote: .
   specs:
-    ag_ui (0.1.0)
+    ag-ui (0.1.0)
       async (~> 2.0)
-      brute (~> 3.0)
+      brute (~> 3.0, >= 3.0.1)
       json_schemer (~> 2.5)
       protocol-http (~> 0.62)
       rack (~> 3.0)
@@ -72,6 +59,15 @@ GEM
       samovar (~> 2.1)
     base64 (0.3.0)
     bigdecimal (4.1.2)
+    brute (3.0.1)
+      activesupport
+      async (~> 2.0)
+      colorize-extended
+      diff-lcs (>= 1.5)
+      google-protobuf (~> 4.34)
+      json_schemer (~> 2.5)
+      net-http-persistent
+      rack (~> 3.0)
     colorize (1.1.0)
     colorize-extended (0.1.0)
       colorize (~> 1.1)
@@ -244,8 +240,7 @@ PLATFORMS
   x86_64-linux-musl
 
 DEPENDENCIES
-  ag_ui!
-  brute!
+  ag-ui!
   falcon (~> 0.55)
   lefthook (~> 2.1)
   rake (~> 13.0)
