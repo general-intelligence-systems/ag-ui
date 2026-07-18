@@ -108,18 +108,30 @@ module AgUi
           end
         end
 
+        # Components are validated with the ported a2ui_toolkit semantics
+        # (catalog membership, required props, child refs, cycles).
+        # Bindings are NOT validated here — same as the Node middleware
+        # (validateBindings: false): relative template paths resolve
+        # per-item at render time and would false-positive.
         def render(events, tool_call, emitted_surfaces)
           args = tool_call.arguments
           surface_id = args["surfaceId"].to_s
-          components = args["components"]
 
-          if surface_id.empty? || !components.is_a?(Array)
+          validation = ::AgUi::A2ui.validate_components(
+            components: args["components"],
+            data: args["data"].is_a?(Hash) ? args["data"] : {},
+            catalog: @catalog ? { "components" => @catalog.components } : nil,
+            validate_bindings: false,
+          )
+
+          if surface_id.empty? || !validation["valid"]
             failure = {
               "status" => "failed",
-              "error" => "render_a2ui requires surfaceId and components",
+              "error" => "render_a2ui produced invalid components",
+              "errors" => validation["errors"],
             }
             events << activity(tool_call, failure)
-            events << result(tool_call, { "status" => "failed" })
+            events << result(tool_call, { "status" => "failed", "errors" => validation["errors"] })
           else
             ops = operations(args, surface_id, emitted_surfaces)
             events << activity(tool_call, { "a2ui_operations" => ops })
@@ -252,9 +264,11 @@ describe "AgUi::Middleware::A2ui" do
     result[:data][:content].should == "{\"status\":\"rendered\"}"
   end
 
+  minimal_components = [{ "id" => "root", "component" => "Card" }]
+
   it "falls back to the basic catalog id when degraded" do
     terminal = ->(env) do
-      env[:messages] << render_call.("surfaceId" => "s1", "components" => [])
+      env[:messages] << render_call.("surfaceId" => "s1", "components" => minimal_components)
     end
 
     env = { messages: Brute.log, events: [], tools: [] }
@@ -271,9 +285,9 @@ describe "AgUi::Middleware::A2ui" do
         role: :assistant, content: nil,
         tool_calls: [
           { id: "tc1", name: "render_a2ui",
-            arguments: { "surfaceId" => "s1", "components" => [] } },
+            arguments: { "surfaceId" => "s1", "components" => minimal_components } },
           { id: "tc2", name: "render_a2ui",
-            arguments: { "surfaceId" => "s1", "components" => [] } },
+            arguments: { "surfaceId" => "s1", "components" => minimal_components } },
         ],
       )
     end
@@ -305,6 +319,26 @@ describe "AgUi::Middleware::A2ui" do
 
     env[:events].length.should == 2
     env[:events][0][:data][:content]["status"].should == "failed"
-    env[:events][1][:data][:content].should == "{\"status\":\"failed\"}"
+    JSON.parse(env[:events][1][:data][:content])["status"].should == "failed"
+  end
+
+  it "rejects semantically invalid trees via the toolkit validator" do
+    terminal = ->(env) do
+      env[:messages] << render_call.(
+        "surfaceId" => "s1",
+        "components" => [
+          { "id" => "root", "component" => "Mystery", "children" => ["ghost"] },
+        ],
+      )
+    end
+
+    env = { messages: Brute.log, events: [], tools: [] }
+    AgUi::Middleware::A2ui.new(terminal, catalog: catalog).call(env)
+
+    content = env[:events][0][:data][:content]
+    content["status"].should == "failed"
+    codes = content["errors"].map { |e| e["code"] }
+    codes.should.include?("unknown_component")
+    codes.should.include?("unresolved_child")
   end
 end

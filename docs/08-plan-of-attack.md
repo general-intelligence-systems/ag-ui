@@ -204,8 +204,9 @@ zero host-app coupling.
       before `RUN_FINISHED` — LIVE-verified: Claude composed a Card+Text tree
       from the demo catalog (`examples/a2ui.rb`); continuation run confirmed
       the model sees the rendered result
-- [ ] Validate operations with the ported `a2ui_toolkit` validate/recovery logic
-      (currently: minimal surfaceId/components check → failed status)
+- [x] `a2ui_toolkit` ported (`A2ui::Validate` + `A2ui::Recovery`), upstream
+      test suites as the oracle; wired into `Middleware::A2ui#render` with
+      `validate_bindings: false` (Node-middleware parity)
 - [x] `surfaceId` dedup within a turn: `createSurface` once, updates thereafter
       (runs are stateless — cross-run dedup is the client's SurfaceMessageProcessor)
 - [x] Activity messages round-trip: the client sends them back in history;
