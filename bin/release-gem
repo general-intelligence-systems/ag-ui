@@ -22,6 +22,12 @@ else
   puts "Gem not yet published remotely, proceeding with first release"
 end
 
+tag = "v#{local_version}"
+existing_tag = `git tag -l #{tag}`.strip
+unless existing_tag.empty?
+  abort "ERROR: Tag #{tag} already exists"
+end
+
 puts "Building #{gemspec}..."
 system("gem build #{gemspec}") || abort("ERROR: gem build failed")
 
@@ -29,4 +35,8 @@ gem_file = "#{gem_name}-#{local_version}.gem"
 puts "Pushing #{gem_file}..."
 system("gem push #{gem_file}") || abort("ERROR: gem push failed")
 
-puts "Released #{gem_name} #{local_version}"
+puts "Tagging #{tag}..."
+system("git tag #{tag}") || abort("ERROR: Failed to create tag #{tag}")
+system("git push origin #{tag}") || warn("WARNING: tag push failed — push manually: git push origin #{tag}")
+
+puts "Released #{gem_name} #{local_version} (tagged #{tag})"
