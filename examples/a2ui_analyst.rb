@@ -53,13 +53,30 @@ terminal = AgUi::Terminals::RubyLLM.new(
   model: ENV.fetch("COPILOTKIT_MODEL", "anthropic/claude-sonnet-4-5"),
 )
 
-run_loop = AgUi::RunLoop.new(
-  system_prompt: SYSTEM_PROMPT,
-  a2ui: AgUi::A2ui::Catalog.new(catalog_id: CATALOG_ID, components: CATALOG_COMPONENTS),
-  &terminal
-)
+CATALOG = AgUi::A2ui::Catalog.new(catalog_id: CATALOG_ID, components: CATALOG_COMPONENTS)
 
-ANALYST_AGENT = AgUi.agent(agent_id: "default", a2ui_enabled: true, &run_loop)
+# A standard Brute agent with the A2UI middleware. Driven inside the AG-UI run
+# handler (open stream, RUN_STARTED → turn → RUN_FINISHED, RUN_ERROR).
+ANALYST_AGENT = AgUi.agent(agent_id: "default", a2ui_enabled: true) do |env|
+  input = env["ag_ui.input"]
+
+  agent = Brute.agent
+               .use(AgUi::Middleware::SystemPrompt, prompt: SYSTEM_PROMPT, context: input.context)
+               .use(AgUi::Middleware::ForwardedProps, props: input.forwarded_props)
+               .use(Brute::Middleware::Loop::ToolResult)
+               .use(Brute::Middleware::MaxIterations, max_iterations: 10)
+               .use(AgUi::Middleware::A2ui, catalog: CATALOG)
+               .use(AgUi::Middleware::ToolRouter, tools: input.tools, server_tools: [])
+               .run(terminal)
+
+  env["ag_ui.stream"].open(thread_id: input.thread_id, run_id: input.run_id) do |stream|
+    stream.run_started
+    agent.start(AgUi::Messages.to_brute(input.messages), events: AgUi::EventBridge.new(stream))
+    stream.run_finished
+  rescue => e
+    stream.run_error(message: e.message, code: e.class.name)
+  end
+end
 
 # The showcase points HttpAgents at :8123/fixed and :8123/dynamic — both
 # rewrite to the bare-run root of the same agent.

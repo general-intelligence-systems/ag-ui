@@ -10,14 +10,34 @@ require "ag_ui/terminals/ruby_llm"
 
 RubyLLM.configure { |c| c.anthropic_api_key = ENV.fetch("ANTHROPIC_API_KEY") }
 
-run_loop = AgUi::RunLoop.new(
-  system_prompt: "You are a helpful assistant.",
-  &AgUi::Terminals::RubyLLM.new(model: "anthropic/claude-sonnet-4-5")
-)
+terminal = AgUi::Terminals::RubyLLM.new(model: "anthropic/claude-sonnet-4-5")
 
-# A Rack app serving /info, /agent/:id/run (SSE), /connect, /stop —
+# AgUi.agent gives you a Rack app serving /info, /agent/:id/run (SSE), /connect,
+# /stop. The block is the per-run handler: open the SSE stream and drive a
+# STANDARD Brute agent — the AG-UI middleware stack over your terminal.
+app = AgUi.agent(agent_id: "default") do |env|
+  input = env["ag_ui.input"]
+
+  agent = Brute.agent
+               .use(AgUi::Middleware::SystemPrompt,
+                    prompt: "You are a helpful assistant.", context: input.context)
+               .use(AgUi::Middleware::ForwardedProps, props: input.forwarded_props)
+               .use(Brute::Middleware::Loop::ToolResult)
+               .use(Brute::Middleware::MaxIterations, max_iterations: 10)
+               .use(AgUi::Middleware::ToolRouter, tools: input.tools, server_tools: [])
+               .run(terminal)
+
+  env["ag_ui.stream"].open(thread_id: input.thread_id, run_id: input.run_id) do |stream|
+    stream.run_started
+    agent.start(AgUi::Messages.to_brute(input.messages), events: AgUi::EventBridge.new(stream))
+    stream.run_finished
+  rescue => e
+    stream.run_error(message: e.message, code: e.class.name)
+  end
+end
+
 # mount it wherever the client's runtimeUrl points.
-run AgUi.agent(agent_id: "default", &run_loop)
+run app
 ```
 
 ## What you get

@@ -14,8 +14,8 @@ module AgUi
     #   require "ag_ui/terminals/ruby_llm"
     #
     #   RubyLLM.configure { |c| c.anthropic_api_key = ENV["ANTHROPIC_API_KEY"] }
-    #   run_loop = AgUi::RunLoop.new(system_prompt: PROMPT,
-    #                                &AgUi::Terminals::RubyLLM.new)
+    #   terminal = AgUi::Terminals::RubyLLM.new
+    #   agent = Brute.agent.use(...).run(terminal)   # standard Brute agent
     #
     # One assistant turn per call: seeds the chat from env[:messages]
     # (including prior tool-call turns), registers env[:tools] as
@@ -517,7 +517,7 @@ describe "AgUi::Terminals::RubyLLM" do
     captured.should == [[:anthropic, "claude-sonnet-4-5"], [:anthropic, "claude-sonnet-4-5"]]
   end
 
-  it "drives the full client-tool run through RunLoop + ToolRouter" do
+  it "drives the full client-tool run through a standard Brute agent + ToolRouter" do
     tool_calls = {
       "tc1" => ::RubyLLM::ToolCall.new(id: "tc1", name: "navigate",
                                        arguments: { "path" => "/data" }),
@@ -525,8 +525,23 @@ describe "AgUi::Terminals::RubyLLM" do
     fake = fake_chat_class.new(final: nil, tool_calls: tool_calls)
     terminal = AgUi::Terminals::RubyLLM.new(chat_factory: ->(**) { fake })
 
-    run_loop = AgUi::RunLoop.new(system_prompt: "Be terse.", &terminal)
-    app = AgUi.agent(agent_id: "default", &run_loop)
+    app = AgUi.agent(agent_id: "default") do |env|
+      input = env["ag_ui.input"]
+      agent = Brute.agent
+                   .use(AgUi::Middleware::SystemPrompt, prompt: "Be terse.", context: input.context)
+                   .use(AgUi::Middleware::ForwardedProps, props: input.forwarded_props)
+                   .use(Brute::Middleware::Loop::ToolResult)
+                   .use(Brute::Middleware::MaxIterations, max_iterations: 10)
+                   .use(AgUi::Middleware::ToolRouter, tools: input.tools, server_tools: [])
+                   .run(terminal)
+      env["ag_ui.stream"].open(thread_id: input.thread_id, run_id: input.run_id) do |stream|
+        stream.run_started
+        agent.start(AgUi::Messages.to_brute(input.messages), events: AgUi::EventBridge.new(stream))
+        stream.run_finished
+      rescue => e
+        stream.run_error(message: e.message, code: e.class.name)
+      end
+    end
 
     body = JSON.generate({
       "threadId" => "t1", "runId" => "r1", "state" => nil,

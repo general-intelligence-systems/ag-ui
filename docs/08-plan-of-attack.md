@@ -125,8 +125,8 @@ Default: depend on `brute` — same author, same stack, and we inherit
       required): verified LIVE — claude-sonnet-4-5 deltas streamed through
       Falcon end to end (2.4s), multi-turn history recall + context addendum
       confirmed (`examples/claude.ru`)
-- [x] Brute pipeline skeleton: `RunLoop` (RUN_STARTED → pipeline →
-      RUN_FINISHED/RUN_ERROR) + `EventBridge` (env[:events] → SSE, live) +
+- [x] Brute pipeline skeleton: the AG-UI run handler (RUN_STARTED → a standard
+      `Brute.agent` turn → RUN_FINISHED/RUN_ERROR) + `EventBridge` (env[:events] → SSE, live) +
       `Messages.to_brute` (toolCalls round-trip) + `Middleware::SystemPrompt`
       (prompt + context addendum). NOTE: Gemfile path-pins brute to the
       sibling checkout — published 3.0.0 predates Brute::Message
@@ -236,8 +236,8 @@ zero host-app coupling.
       streamed real deltas then the answer (`examples/claude.rb`)
 
 ### Phase 6 — Tail (post-cutover)
-- [x] Server tools: `RunLoop(server_tools: [{name:, description:, parameters:,
-      handler:}])` — `ToolRouter` executes inline, emits `TOOL_CALL_RESULT`
+- [x] Server tools: `ToolRouter(server_tools: [{name:, description:, parameters:,
+      handler:}])` — executes inline, emits `TOOL_CALL_RESULT`
       (Node shape), appends the `:tool` message; `Loop::ToolResult` +
       `MaxIterations` drive the turn — LIVE: weather question executed the
       tool and continued the same run with the answer

@@ -31,8 +31,7 @@ lib/ag_ui/server/
   info.rb                     # GET /info capabilities
 lib/ag_ui/events.rb           # typed emitters + schemas (the AG-UI vocabulary)
 lib/ag_ui/run_input.rb        # parse/validate RunAgentInput
-lib/ag_ui/run_loop.rb         # the loop over ruby_llm (03)
-lib/ag_ui/tools.rb            # client-defer vs server-exec routing (03)
+lib/ag_ui/middleware/tool_router.rb # client-defer vs server-exec routing (03)
 lib/ag_ui/middleware/a2ui.rb  # render_a2ui injection + activity conversion (04)
 lib/ag_ui/protocol/json_schema.rb  # reuse a2a validation
 ```
@@ -100,6 +99,6 @@ then delete it.
 ## Effort
 
 Smaller than the a2a gem you already shipped: the transport is reused, the new
-surface is ~6 focused files (events, run_input, run_loop, tools, a2ui, info).
+surface is ~6 focused files (events, run_input, middleware, tool_router, a2ui, info).
 Phase 1 is a spike (a day-ish); tools/A2UI are the substance; suggestions +
 `/connect` + memory are the tail.

@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    ag-ui (0.1.0)
+    ag-ui (0.2.0)
       async (~> 2.0)
       brute (~> 3.0, >= 3.0.1)
       json_schemer (~> 2.5)
