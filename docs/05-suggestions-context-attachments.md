@@ -28,28 +28,37 @@ and `@ag-ui/core` `InputContentSchema` for exact JSON.
 
 ## `useConfigureSuggestions` / `useSuggestions` → a suggestion run
 
-This is the one that needs a design decision — **investigate the exact client
-call before implementing.** The client publishes a suggestion *config*
-(`instructions`, `minSuggestions`, `maxSuggestions`, `available`) and, when it
-reloads, asks the agent to **generate** suggestions.
+**SETTLED** — reverse-engineered from the v2 source
+(`packages/core/src/core/suggestion-engine.ts` in the CopilotKit repo;
+static-path usage cross-checked in the banking showcase, dynamic-path usage
+in the host app's per-page hook):
 
-Open questions to answer from the client source
-(`@copilotkit/react-core/v2` `use-configure-suggestions` /
-`use-suggestions`, and `docs/concepts` if covered):
+1. **How the reload reaches the server** (fallback/clone transport — the one
+   a runtime like ours triggers, since we don't advertise `suggestions: true`):
+   the client CLONES the provider agent client-side, seeds a deep copy of the
+   consumer's `messages` + `state`, appends a **user message** with a built
+   instruction block ("Suggest what the user could say next… by calling the
+   `copilotkitSuggest` tool. Provide at least N and at most M… The user has
+   the following tools available: <json>. <config.instructions>"), and POSTs
+   an ORDINARY `/agent/:id/run` with:
+   - `tools: [copilotkitSuggest]` — a normal frontend-tool definition:
+     `{ suggestions: [{ title, message }] }` (title = the button text)
+   - `forwardedProps.toolChoice = { type: "function",
+     function: { name: "copilotkitSuggest" } }` — the FORCED tool choice
+2. **What comes back**: the standard client-tool stream — `TOOL_CALL_START`
+   (`copilotkitSuggest`) + `TOOL_CALL_ARGS` deltas. The client
+   partial-JSON-parses the args as they stream and renders the pills. No
+   special events, no structured-output channel.
+3. **agentId**: `providerAgentId` defaults to `"default"`; `threadId` is a
+   random suggestion id (nothing to persist).
+4. **Newer stateless path** (not required): runtimes that advertise
+   `suggestions: true` get `POST /agent/:id/suggest` — same run semantics
+   without thread persistence. Our runs don't persist anyway; add the alias
+   route only if we ever advertise the capability.
 
-1. **How does the reload reach the server?** Almost certainly a normal `/run`
-   with the `instructions` provided as a special system/developer message (or via
-   `forwardedProps`), expecting a **structured** list back.
-2. **What shape must come back?** Suggestions are `{ title, message }[]`. The
-   client likely expects them via a specific tool call or structured output, not
-   free text. Nail this from the client's parser.
-3. **Which `agentId`?** `providerAgentId` defaults to `"default"` — our sidecar
-   agent generates them. So the same `ruby_llm` model produces them; use
-   `with_schema` (structured output) to return `[{title, message}]` reliably.
-
-Until this is reverse-engineered, suggestions can stay on the host-app
-registry-static path (already shipped) — dynamic suggestions are a nice-to-have,
-not a blocker for cutover.
+**So the server-side work is ONE thing**: honor `forwardedProps.toolChoice`
+(force the named tool via ruby_llm's tool-choice preference). Everything else
+is the already-working client-tool path.
 
 ## Reasoning (extended thinking)
 
